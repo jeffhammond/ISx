@@ -82,13 +82,12 @@ int main(const int argc,  char ** argv)
 
   char * log_file = parse_params(argc, argv);
 
-  bucket_sort();
-
+  int err = bucket_sort();
 
   log_times(log_file);
 
   shmem_finalize();
-
+  return err;
 }
 
 
@@ -96,26 +95,28 @@ int main(const int argc,  char ** argv)
 // to set all necessary runtime values and options
 static char * parse_params(const int argc, char ** argv)
 {
-  if(argc != 4)
+  if(argc != 3)
   {
     if( shmem_my_pe() == 0){
       printf("Usage:  \n");
-      printf("  ./%s <num_pes> <total num keys(strong) | keys per pe(weak)> <log_file>\n",argv[0]);
+      printf("  ./%s <total num keys(strong) | keys per pe(weak)> <log_file>\n",argv[0]);
     }
-    exit(0);
+
+    shmem_finalize();
+    exit(1);
   }
 
-  NUM_PES = (uint64_t) atoi(argv[1]);
+  NUM_PES = (uint64_t) shmem_n_pes();
   MAX_KEY_VAL = DEFAULT_MAX_KEY;
   NUM_BUCKETS = NUM_PES;
   BUCKET_WIDTH = (uint64_t) ceil((double)MAX_KEY_VAL/NUM_BUCKETS);
-  char * log_file = argv[3];
+  char * log_file = argv[2];
   char scaling_msg[64];
 
   switch(SCALING_OPTION){
     case STRONG:
       {
-        TOTAL_KEYS = (uint64_t) atoi(argv[2]);
+        TOTAL_KEYS = (uint64_t) atoi(argv[1]);
         NUM_KEYS_PER_PE = (uint64_t) ceil((double)TOTAL_KEYS/NUM_PES);
         sprintf(scaling_msg,"STRONG");
         break;
@@ -123,14 +124,14 @@ static char * parse_params(const int argc, char ** argv)
 
     case WEAK:
       {
-        NUM_KEYS_PER_PE = (uint64_t) (atoi(argv[2]));
+        NUM_KEYS_PER_PE = (uint64_t) (atoi(argv[1]));
         sprintf(scaling_msg,"WEAK");
         break;
       }
 
     case WEAK_ISOBUCKET:
       {
-        NUM_KEYS_PER_PE = (uint64_t) (atoi(argv[2]));
+        NUM_KEYS_PER_PE = (uint64_t) (atoi(argv[1]));
         BUCKET_WIDTH = ISO_BUCKET_WIDTH; 
         MAX_KEY_VAL = (uint64_t) (NUM_PES * BUCKET_WIDTH);
         sprintf(scaling_msg,"WEAK_ISOBUCKET");
@@ -142,7 +143,9 @@ static char * parse_params(const int argc, char ** argv)
         if(shmem_my_pe() == 0){
           printf("Invalid scaling option! See params.h to define the scaling option.\n");
         }
-        exit(0);
+
+        shmem_finalize();
+        exit(1);
         break;
       }
   }
@@ -153,18 +156,17 @@ static char * parse_params(const int argc, char ** argv)
   assert(MAX_KEY_VAL > NUM_PES);
   assert(NUM_BUCKETS > 0);
   assert(BUCKET_WIDTH > 0);
-  assert(shmem_n_pes() == NUM_PES);
-
+  
   if(shmem_my_pe() == 0){
-    printf("ISx v1.0 \n");
+    printf("ISx v%1d.%1d\n",MAJOR_VERSION_NUMBER,MINOR_VERSION_NUMBER);
 #ifdef PERMUTE
     printf("Random Permute Used in ATA.\n");
 #endif
-    printf("  Number of Keys per PE: %llu\n", NUM_KEYS_PER_PE);
-    printf("  Max Key Value: %llu\n", MAX_KEY_VAL);
-    printf("  Bucket Width: %llu\n", BUCKET_WIDTH);
+    printf("  Number of Keys per PE: %" PRIu64 "\n", NUM_KEYS_PER_PE);
+    printf("  Max Key Value: %" PRIu64 "\n", MAX_KEY_VAL);
+    printf("  Bucket Width: %" PRIu64 "\n", BUCKET_WIDTH);
     printf("  Number of Iterations: %u\n", NUM_ITERATIONS);
-    printf("  Number of PEs: %llu\n", NUM_PES);
+    printf("  Number of PEs: %" PRIu64 "\n", NUM_PES);
     printf("  %s Scaling!\n",scaling_msg);
     }
 
@@ -178,8 +180,9 @@ static char * parse_params(const int argc, char ** argv)
  * Only iterations after the BURN_IN iterations are timed
  * Only the final iteration calls the verification function
  */
-static void bucket_sort(void)
+static int bucket_sort(void)
 {
+  int err = 0;
 
   init_timers(NUM_ITERATIONS);
 
@@ -187,7 +190,7 @@ static void bucket_sort(void)
   create_permutation_array();
 #endif
 
-  for(int i = 0; i < (NUM_ITERATIONS + BURN_IN); ++i)
+  for(uint64_t i = 0; i < (NUM_ITERATIONS + BURN_IN); ++i)
   {
 
     // Reset timers after burn in 
@@ -221,7 +224,7 @@ static void bucket_sort(void)
 
     // Only the last iteration is verified
     if(i == NUM_ITERATIONS) { 
-      verify_results(my_local_key_counts, my_bucket_keys);
+      err = verify_results(my_local_key_counts, my_bucket_keys);
     }
 
     // Reset receive_offset used in exchange_keys
@@ -236,6 +239,8 @@ static void bucket_sort(void)
 
     shmem_barrier_all();
   }
+
+  return err;
 }
 
 
@@ -251,7 +256,7 @@ static KEY_TYPE * make_input(void)
 
   pcg32_random_t rng = seed_my_rank();
 
-  for(int i = 0; i < NUM_KEYS_PER_PE; ++i) {
+  for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i) {
     my_keys[i] = pcg32_boundedrand_r(&rng, MAX_KEY_VAL);
   }
 
@@ -262,7 +267,7 @@ static KEY_TYPE * make_input(void)
   char msg[1024];
   const int my_rank = shmem_my_pe();
   sprintf(msg,"Rank %d: Initial Keys: ", my_rank);
-  for(int i = 0; i < NUM_KEYS_PER_PE; ++i){
+  for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i){
     if(i < PRINT_MAX)
     sprintf(msg + strlen(msg),"%d ", my_keys[i]);
   }
@@ -281,14 +286,13 @@ static KEY_TYPE * make_input(void)
  */
 static inline int * count_local_bucket_sizes(KEY_TYPE const * restrict const my_keys)
 {
-  const int my_rank = shmem_my_pe();
   int * restrict const local_bucket_sizes = malloc(NUM_BUCKETS * sizeof(int));
 
   timer_start(&timers[TIMER_BCOUNT]);
 
   init_array(local_bucket_sizes, NUM_BUCKETS);
 
-  for(int i = 0; i < NUM_KEYS_PER_PE; ++i){
+  for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i){
     const uint32_t bucket_index = my_keys[i]/BUCKET_WIDTH;
     local_bucket_sizes[bucket_index]++;
   }
@@ -298,8 +302,9 @@ static inline int * count_local_bucket_sizes(KEY_TYPE const * restrict const my_
 #ifdef DEBUG
   wait_my_turn();
   char msg[1024];
+  const int my_rank = shmem_my_pe();
   sprintf(msg,"Rank %d: local bucket sizes: ", my_rank);
-  for(int i = 0; i < NUM_BUCKETS; ++i){
+  for(uint64_t i = 0; i < NUM_BUCKETS; ++i){
     if(i < PRINT_MAX)
     sprintf(msg + strlen(msg),"%d ", local_bucket_sizes[i]);
   }
@@ -331,7 +336,7 @@ static inline int * compute_local_bucket_offsets(int const * restrict const loca
   local_bucket_offsets[0] = 0;
   (*send_offsets)[0] = 0;
   int temp = 0;
-  for(int i = 1; i < NUM_BUCKETS; i++){
+  for(uint64_t i = 1; i < NUM_BUCKETS; i++){
     temp = local_bucket_offsets[i-1] + local_bucket_sizes[i-1];
     local_bucket_offsets[i] = temp; 
     (*send_offsets)[i] = temp;
@@ -343,7 +348,7 @@ static inline int * compute_local_bucket_offsets(int const * restrict const loca
   char msg[1024];
   const int my_rank = shmem_my_pe();
   sprintf(msg,"Rank %d: local bucket offsets: ", my_rank);
-  for(int i = 0; i < NUM_BUCKETS; ++i){
+  for(uint64_t i = 0; i < NUM_BUCKETS; ++i){
     if(i < PRINT_MAX)
     sprintf(msg + strlen(msg),"%d ", local_bucket_offsets[i]);
   }
@@ -366,12 +371,13 @@ static inline KEY_TYPE * bucketize_local_keys(KEY_TYPE const * restrict const my
 
   timer_start(&timers[TIMER_BUCKETIZE]);
 
-  for(int i = 0; i < NUM_KEYS_PER_PE; ++i){
+  for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i){
     const KEY_TYPE key = my_keys[i];
     const uint32_t bucket_index = key / BUCKET_WIDTH;
-    const uint32_t index = local_bucket_offsets[bucket_index]++;
+    uint32_t index;
+    assert(local_bucket_offsets[bucket_index] >= 0);
+    index = local_bucket_offsets[bucket_index]++;
     assert(index < NUM_KEYS_PER_PE);
-    assert(index >= 0);
     my_local_bucketed_keys[index] = key;
   }
 
@@ -382,7 +388,7 @@ static inline KEY_TYPE * bucketize_local_keys(KEY_TYPE const * restrict const my
   char msg[1024];
   const int my_rank = shmem_my_pe();
   sprintf(msg,"Rank %d: local bucketed keys: ", my_rank);
-  for(int i = 0; i < NUM_KEYS_PER_PE; ++i){
+  for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i){
     if(i < PRINT_MAX)
     sprintf(msg + strlen(msg),"%d ", my_local_bucketed_keys[i]);
   }
@@ -414,7 +420,7 @@ static inline KEY_TYPE * exchange_keys(int const * restrict const send_offsets,
          local_bucket_sizes[my_rank]*sizeof(KEY_TYPE));
 
 
-  for(int i = 0; i < NUM_PES; ++i){
+  for(uint64_t i = 0; i < NUM_PES; ++i){
 
 #ifdef PERMUTE
     const int target_pe = permute_array[i];
@@ -457,7 +463,7 @@ static inline KEY_TYPE * exchange_keys(int const * restrict const send_offsets,
   char msg[1024];
   sprintf(msg,"Rank %d: Bucket Size %lld | Total Keys Sent: %u | Keys after exchange:", 
                         my_rank, receive_offset, total_keys_sent);
-  for(int i = 0; i < receive_offset; ++i){
+  for(long long int i = 0; i < receive_offset; ++i){
     if(i < PRINT_MAX)
     sprintf(msg + strlen(msg),"%d ", my_bucket_keys[i]);
   }
@@ -488,10 +494,10 @@ static inline int * count_local_keys(KEY_TYPE const * restrict const my_bucket_k
   const int my_min_key = my_rank * BUCKET_WIDTH;
 
   // Count the occurences of each key in my bucket
-  for(int i = 0; i < my_bucket_size; ++i){
+  for(long long int i = 0; i < my_bucket_size; ++i){
     const unsigned int key_index = my_bucket_keys[i] - my_min_key;
 
-    assert(key_index >= 0);
+    assert(my_bucket_keys[i] >= my_min_key);
     assert(key_index < BUCKET_WIDTH);
 
     my_local_key_counts[key_index]++;
@@ -502,7 +508,7 @@ static inline int * count_local_keys(KEY_TYPE const * restrict const my_bucket_k
   wait_my_turn();
   char msg[4096];
   sprintf(msg,"Rank %d: Bucket Size %lld | Local Key Counts:", my_rank, my_bucket_size);
-  for(int i = 0; i < BUCKET_WIDTH; ++i){
+  for(uint64_t i = 0; i < BUCKET_WIDTH; ++i){
     if(i < PRINT_MAX)
     sprintf(msg + strlen(msg),"%d ", my_local_key_counts[i]);
   }
@@ -520,13 +526,13 @@ static inline int * count_local_keys(KEY_TYPE const * restrict const my_bucket_k
  * Ensures all keys are within a PE's bucket boundaries.
  * Ensures the final number of keys is equal to the initial.
  */
-static void verify_results(int const * restrict const my_local_key_counts, 
+static int verify_results(int const * restrict const my_local_key_counts,
                            KEY_TYPE const * restrict const my_local_keys)
 {
 
   shmem_barrier_all();
 
-  int passed = 1;
+  int error = 0;
 
   const int my_rank = shmem_my_pe();
 
@@ -534,24 +540,24 @@ static void verify_results(int const * restrict const my_local_key_counts,
   const int my_max_key = (my_rank+1) * BUCKET_WIDTH - 1;
 
   // Verify all keys are within bucket boundaries
-  for(int i = 0; i < my_bucket_size; ++i){
+  for(long long int i = 0; i < my_bucket_size; ++i){
     const int key = my_local_keys[i];
     if((key < my_min_key) || (key > my_max_key)){
       printf("Rank %d Failed Verification!\n",my_rank);
       printf("Key: %d is outside of bounds [%d, %d]\n", key, my_min_key, my_max_key);
-      passed = 0;
+      error = 1;
     }
   }
 
   // Verify the sum of the key population equals the expected bucket size
   long long int bucket_size_test = 0;
-  for(int i = 0; i < BUCKET_WIDTH; ++i){
+  for(uint64_t i = 0; i < BUCKET_WIDTH; ++i){
     bucket_size_test +=  my_local_key_counts[i];
   }
   if(bucket_size_test != my_bucket_size){
       printf("Rank %d Failed Verification!\n",my_rank);
       printf("Actual Bucket Size: %lld Should be %lld\n", bucket_size_test, my_bucket_size);
-      passed = 0;
+      error = 1;
   }
 
   // Verify the final number of keys equals the initial number of keys
@@ -562,10 +568,12 @@ static void verify_results(int const * restrict const my_local_key_counts,
   if(total_num_keys != (long long int)(NUM_KEYS_PER_PE * NUM_PES)){
     if(my_rank == ROOT_PE){
       printf("Verification Failed!\n");
-      printf("Actual total number of keys: %lld Expected %llu\n", total_num_keys, NUM_KEYS_PER_PE * NUM_PES );
-      passed = 0;
+      printf("Actual total number of keys: %lld Expected %" PRIu64 "\n", total_num_keys, NUM_KEYS_PER_PE * NUM_PES );
+      error = 1;
     }
   }
+
+  return error;
 }
 
 /*
@@ -576,7 +584,7 @@ static void log_times(char * log_file)
 {
   FILE * fp = NULL;
 
-  for(int i = 0; i < TIMER_NTIMERS; ++i){
+  for(uint64_t i = 0; i < TIMER_NTIMERS; ++i){
     timers[i].all_times = gather_rank_times(&timers[i]);
     timers[i].all_counts = gather_rank_counts(&timers[i]);
   }
@@ -590,7 +598,7 @@ static void log_times(char * log_file)
 
     if((fp = fopen(log_file, "a+b"))==NULL){
       perror("Error opening log file:");
-      exit(0);
+      exit(1);
     }
 
     if(print_names == 1){
@@ -615,7 +623,7 @@ static void report_summary_stats(void)
   if(timers[TIMER_TOTAL].seconds_iter > 0) {
     const uint32_t num_records = NUM_PES * timers[TIMER_TOTAL].seconds_iter;
     double temp = 0.0;
-    for(int i = 0; i < num_records; ++i){
+    for(uint64_t i = 0; i < num_records; ++i){
       temp += timers[TIMER_TOTAL].all_times[i];
     }
       printf("Average total time (per PE): %f seconds\n", temp/num_records);
@@ -624,7 +632,7 @@ static void report_summary_stats(void)
   if(timers[TIMER_ATA_KEYS].seconds_iter >0) {
     const uint32_t num_records = NUM_PES * timers[TIMER_ATA_KEYS].seconds_iter;
     double temp = 0.0;
-    for(int i = 0; i < num_records; ++i){
+    for(uint64_t i = 0; i < num_records; ++i){
       temp += timers[TIMER_ATA_KEYS].all_times[i];
     }
     printf("Average all2all time (per PE): %f seconds\n", temp/num_records);
@@ -636,7 +644,7 @@ static void report_summary_stats(void)
  */
 static void print_timer_names(FILE * fp)
 {
-  for(int i = 0; i < TIMER_NTIMERS; ++i){
+  for(uint64_t i = 0; i < TIMER_NTIMERS; ++i){
     if(timers[i].seconds_iter > 0){
       fprintf(fp, "%s (sec)\t", timer_names[i]);
     }
@@ -653,22 +661,22 @@ static void print_timer_names(FILE * fp)
 static void print_run_info(FILE * fp)
 {
   fprintf(fp,"SHMEM\t");
-  fprintf(fp,"NUM_PES %llu\t", NUM_PES);
-  fprintf(fp,"Max_Key %llu\t", MAX_KEY_VAL); 
+  fprintf(fp,"NUM_PES %" PRIu64 "\t", NUM_PES);
+  fprintf(fp,"Max_Key %" PRIu64 "\t", MAX_KEY_VAL); 
   fprintf(fp,"Num_Iters %u\t", NUM_ITERATIONS);
 
   switch(SCALING_OPTION){
     case STRONG: {
-        fprintf(fp,"Strong Scaling: %llu total keys\t", NUM_KEYS_PER_PE * NUM_PES);
+        fprintf(fp,"Strong Scaling: %" PRIu64 " total keys\t", NUM_KEYS_PER_PE * NUM_PES);
         break;
       }
     case WEAK: {
-        fprintf(fp,"Weak Scaling: %llu keys per PE\t", NUM_KEYS_PER_PE);
+        fprintf(fp,"Weak Scaling: %" PRIu64 " keys per PE\t", NUM_KEYS_PER_PE);
         break;
       }
     case WEAK_ISOBUCKET: {
-        fprintf(fp,"Weak Scaling Constant Bucket Width: %llu keys per PE \t", NUM_KEYS_PER_PE);
-        fprintf(fp,"Constant Bucket Width: %llu\t", BUCKET_WIDTH);
+        fprintf(fp,"Weak Scaling Constant Bucket Width: %" PRIu64 "u keys per PE \t", NUM_KEYS_PER_PE);
+        fprintf(fp,"Constant Bucket Width: %" PRIu64 "\t", BUCKET_WIDTH);
         break;
       }
     default:
@@ -698,7 +706,7 @@ static void print_timer_values(FILE * fp)
 {
   unsigned int num_records = NUM_PES * NUM_ITERATIONS; 
 
-  for(int i = 0; i < num_records; ++i) {
+  for(uint64_t i = 0; i < num_records; ++i) {
     for(int t = 0; t < TIMER_NTIMERS; ++t){
       if(timers[t].all_times != NULL){
         fprintf(fp,"%f\t", timers[t].all_times[i]);
@@ -721,18 +729,29 @@ static double * gather_rank_times(_timer_t * const timer)
     assert(timer->seconds_iter == timer->num_iters);
 
     const unsigned int num_records = NUM_PES * timer->seconds_iter;
-
+#ifdef OPENSHMEM_COMPLIANT
+    double * my_times = shmem_malloc(timer->seconds_iter * sizeof(double));
+#else
     double * my_times = shmalloc(timer->seconds_iter * sizeof(double));
+#endif
     memcpy(my_times, timer->seconds, timer->seconds_iter * sizeof(double));
 
+#ifdef OPENSHMEM_COMPLIANT
+    double * all_times = shmem_malloc( num_records * sizeof(double));
+#else
     double * all_times = shmalloc( num_records * sizeof(double));
+#endif
 
     shmem_barrier_all();
 
     shmem_fcollect64(all_times, my_times, timer->seconds_iter, 0, 0, NUM_PES, pSync);
     shmem_barrier_all();
 
+#ifdef OPENSHMEM_COMPLIANT
+    shmem_free(my_times);
+#else
     shfree(my_times);
+#endif
 
     return all_times;
   }
@@ -749,10 +768,18 @@ static unsigned int * gather_rank_counts(_timer_t * const timer)
   if(timer->count_iter > 0){
     const unsigned int num_records = NUM_PES * timer->num_iters;
 
+#ifdef OPENSHMEM_COMPLIANT
+    unsigned int * my_counts = shmem_malloc(timer->num_iters * sizeof(unsigned int));
+#else
     unsigned int * my_counts = shmalloc(timer->num_iters * sizeof(unsigned int));
+#endif
     memcpy(my_counts, timer->count, timer->num_iters*sizeof(unsigned int));
 
+#ifdef OPENSHMEM_COMPLIANT
+    unsigned int * all_counts = shmem_malloc( num_records * sizeof(unsigned int) );
+#else
     unsigned int * all_counts = shmalloc( num_records * sizeof(unsigned int) );
+#endif
 
     shmem_barrier_all();
 
@@ -760,7 +787,11 @@ static unsigned int * gather_rank_counts(_timer_t * const timer)
 
     shmem_barrier_all();
 
+#ifdef OPENSHMEM_COMPLIANT
+    shmem_free(my_counts);
+#else
     shfree(my_counts);
+#endif
 
     return all_counts;
   }
@@ -785,7 +816,7 @@ static inline pcg32_random_t seed_my_rank(void)
  */
 static void init_shmem_sync_array(long * restrict const pSync)
 {
-  for(int i = 0; i < _SHMEM_REDUCE_SYNC_SIZE; ++i){
+  for(uint64_t i = 0; i < _SHMEM_REDUCE_SYNC_SIZE; ++i){
     pSync[i] = _SHMEM_SYNC_VALUE;
   }
   shmem_barrier_all();
@@ -843,7 +874,7 @@ static void create_permutation_array()
 
   permute_array = (int *) malloc( NUM_PES * sizeof(int) );
 
-  for(int i = 0; i < NUM_PES; ++i){
+  for(uint64_t i = 0; i < NUM_PES; ++i){
     permute_array[i] = i;
   }
 
@@ -859,7 +890,7 @@ static void shuffle(void * array, size_t n, size_t size)
   char * arr = array;
   size_t stride = size * sizeof(char);
   if(n > 1){
-    for(int i = 0; i < (n - 1); ++i){
+    for(size_t i = 0; i < (n - 1); ++i){
       size_t rnd = (size_t) rand();
       size_t j = i + rnd/(RAND_MAX/(n - i) + 1);
       memcpy(tmp, arr + j*stride, size);

@@ -71,12 +71,12 @@ int main(int argc,  char ** argv)
 
   char * log_file = parse_params(argc, argv);
 
-  bucket_sort();
-
+  int err =  bucket_sort();
 
   log_times(log_file);
 
   MPI_Finalize();
+  return err;
 }
 
 
@@ -84,26 +84,26 @@ int main(int argc,  char ** argv)
 // to set all necessary runtime values and options
 static char * parse_params(const int argc, char ** argv)
 {
-  if(argc != 4)
+  if(argc != 3)
   {
     if( my_rank == 0){
       printf("Usage:  \n");
-      printf("  ./%s <num_pes> <total num keys(strong) | keys per pe(weak)> <log_file>\n",argv[0]);
+      printf("  ./%s <total num keys(strong) | keys per pe(weak)> <log_file>\n",argv[0]);
     }
-    exit(0);
+    exit(1);
   }
 
-  NUM_PES = (uint64_t) atoi(argv[1]);
+  NUM_PES = (uint64_t) comm_size;
   MAX_KEY_VAL = DEFAULT_MAX_KEY;
   NUM_BUCKETS = NUM_PES;
   BUCKET_WIDTH = (uint64_t) ceil((double)MAX_KEY_VAL/NUM_BUCKETS);
-  char * log_file = argv[3];
+  char * log_file = argv[2];
   char scaling_msg[64];
 
   switch(SCALING_OPTION){
     case STRONG:
       {
-        TOTAL_KEYS = (uint64_t) atoi(argv[2]);
+        TOTAL_KEYS = (uint64_t) atoi(argv[1]);
         NUM_KEYS_PER_PE = (uint64_t) ceil((double)TOTAL_KEYS/NUM_PES);
         sprintf(scaling_msg,"STRONG");
         break;
@@ -111,14 +111,14 @@ static char * parse_params(const int argc, char ** argv)
 
     case WEAK:
       {
-        NUM_KEYS_PER_PE = (uint64_t) (atoi(argv[2]));
+        NUM_KEYS_PER_PE = (uint64_t) (atoi(argv[1]));
         sprintf(scaling_msg,"WEAK");
         break;
       }
 
     case WEAK_ISOBUCKET:
       {
-        NUM_KEYS_PER_PE = (uint64_t) (atoi(argv[2]));
+        NUM_KEYS_PER_PE = (uint64_t) (atoi(argv[1]));
         BUCKET_WIDTH = ISO_BUCKET_WIDTH; 
         MAX_KEY_VAL = (uint64_t) (NUM_PES * BUCKET_WIDTH);
         sprintf(scaling_msg,"WEAK_ISOBUCKET");
@@ -130,7 +130,7 @@ static char * parse_params(const int argc, char ** argv)
         if(my_rank == 0){
           printf("Invalid scaling option! See params.h to define the scaling option.\n");
         }
-        exit(0);
+        exit(1);
         break;
       }
   }
@@ -141,18 +141,17 @@ static char * parse_params(const int argc, char ** argv)
   assert(MAX_KEY_VAL > NUM_PES);
   assert(NUM_BUCKETS > 0);
   assert(BUCKET_WIDTH > 0);
-  assert(comm_size == NUM_PES);
 
   if(my_rank == 0){
-    printf("ISx MPI v1.0 \n");
+    printf("ISx MPI 2 sided v%1d.%1d\n",MAJOR_VERSION_NUMBER,MINOR_VERSION_NUMBER);
 #ifdef PERMUTE
     printf("Random Permute Used in ATA.\n");
 #endif
-    printf("  Number of Keys per PE: %llu\n", NUM_KEYS_PER_PE);
-    printf("  Max Key Value: %llu\n", MAX_KEY_VAL);
-    printf("  Bucket Width: %llu\n", BUCKET_WIDTH);
+    printf("  Number of Keys per PE: %" PRIu64 "\n", NUM_KEYS_PER_PE);
+    printf("  Max Key Value: %" PRIu64 "\n", MAX_KEY_VAL);
+    printf("  Bucket Width: %" PRIu64 "\n", BUCKET_WIDTH);
     printf("  Number of Iterations: %u\n", NUM_ITERATIONS);
-    printf("  Number of PEs: %llu\n", NUM_PES);
+    printf("  Number of PEs: %" PRIu64 "\n", NUM_PES);
     printf("  %s Scaling!\n",scaling_msg);
     }
 
@@ -166,8 +165,9 @@ static char * parse_params(const int argc, char ** argv)
  * Only iterations after the BURN_IN iterations are timed
  * Only the final iteration calls the verification function
  */
-static void bucket_sort(void)
+static int bucket_sort(void)
 {
+  int err = 0; 
 
   init_timers(NUM_ITERATIONS);
 
@@ -175,7 +175,7 @@ static void bucket_sort(void)
   create_permutation_array();
 #endif
 
-  for(int i = 0; i < (NUM_ITERATIONS + BURN_IN); ++i)
+  for(unsigned int i = 0; i < (NUM_ITERATIONS + BURN_IN); ++i)
   {
 
     // Reset timers after burn in 
@@ -216,7 +216,7 @@ static void bucket_sort(void)
 
     // Only the last iteration is verified
     if(i == NUM_ITERATIONS) { 
-      verify_results(my_local_key_counts, my_bucket_keys, my_bucket_size);
+      err = verify_results(my_local_key_counts, my_bucket_keys, my_bucket_size);
     }
 
 
@@ -230,6 +230,7 @@ static void bucket_sort(void)
 
     MPI_Barrier(MPI_COMM_WORLD);
   }
+  return err;
 }
 
 
@@ -245,7 +246,7 @@ static KEY_TYPE * make_input(void)
 
   pcg32_random_t rng = seed_my_rank();
 
-  for(int i = 0; i < NUM_KEYS_PER_PE; ++i) {
+  for(unsigned int i = 0; i < NUM_KEYS_PER_PE; ++i) {
     my_keys[i] = pcg32_boundedrand_r(&rng, MAX_KEY_VAL);
   }
 
@@ -280,7 +281,7 @@ static inline int * count_local_bucket_sizes(KEY_TYPE const * restrict const my_
 
   init_array(local_bucket_sizes, NUM_BUCKETS);
 
-  for(int i = 0; i < NUM_KEYS_PER_PE; ++i){
+  for(unsigned int i = 0; i < NUM_KEYS_PER_PE; ++i){
     const uint32_t bucket_index = my_keys[i]/BUCKET_WIDTH;
     local_bucket_sizes[bucket_index]++;
   }
@@ -323,7 +324,7 @@ static inline int * compute_local_bucket_offsets(int const * restrict const loca
   local_bucket_offsets[0] = 0;
   (*send_offsets)[0] = 0;
   int temp = 0;
-  for(int i = 1; i < NUM_BUCKETS; i++){
+  for(unsigned int i = 1; i < NUM_BUCKETS; i++){
     temp = local_bucket_offsets[i-1] + local_bucket_sizes[i-1];
     local_bucket_offsets[i] = temp; 
     (*send_offsets)[i] = temp;
@@ -357,12 +358,13 @@ static inline KEY_TYPE * bucketize_local_keys(KEY_TYPE const * restrict const my
 
   timer_start(&timers[TIMER_BUCKETIZE]);
 
-  for(int i = 0; i < NUM_KEYS_PER_PE; ++i){
+  for(unsigned int i = 0; i < NUM_KEYS_PER_PE; ++i){
     const KEY_TYPE key = my_keys[i];
     const uint32_t bucket_index = key / BUCKET_WIDTH;
-    const uint32_t index = local_bucket_offsets[bucket_index]++;
+    uint32_t index;
+    assert(local_bucket_offsets[bucket_index] >= 0);
+    index = local_bucket_offsets[bucket_index]++;
     assert(index < NUM_KEYS_PER_PE);
-    assert(index >= 0);
     my_local_bucketed_keys[index] = key;
   }
 
@@ -395,7 +397,7 @@ static int * exchange_receive_counts(int const * restrict const local_bucket_siz
 
   timer_start(&timers[TIMER_ATA_COUNTS]);
 
-  MPI_Alltoall(local_bucket_sizes,
+  MPI_Alltoall( local_bucket_sizes,
                 1, MPI_INT,
                 my_global_recv_counts,
                 1, MPI_INT,
@@ -516,7 +518,7 @@ static inline int * count_local_keys(KEY_TYPE const * restrict const my_bucket_k
   for(int i = 0; i < my_bucket_size; ++i){
     const unsigned int key_index = my_bucket_keys[i] - my_min_key;
 
-    assert(key_index >= 0);
+    assert(my_bucket_keys[i] >= my_min_key);
     assert(key_index < BUCKET_WIDTH);
 
     my_local_key_counts[key_index]++;
@@ -545,15 +547,14 @@ static inline int * count_local_keys(KEY_TYPE const * restrict const my_bucket_k
  * Ensures all keys are within a PE's bucket boundaries.
  * Ensures the final number of keys is equal to the initial.
  */
-static void verify_results(int const * restrict const my_local_key_counts, 
+static int verify_results(int const * restrict const my_local_key_counts, 
                            KEY_TYPE const * restrict const my_local_keys,
                            const long long int my_bucket_size)
 {
 
   MPI_Barrier(MPI_COMM_WORLD);
 
-  int passed = 1;
-
+  int error = 0;
 
   const int my_min_key = my_rank * BUCKET_WIDTH;
   const int my_max_key = (my_rank+1) * BUCKET_WIDTH - 1;
@@ -564,19 +565,19 @@ static void verify_results(int const * restrict const my_local_key_counts,
     if((key < my_min_key) || (key > my_max_key)){
       printf("Rank %d Failed Verification!\n",my_rank);
       printf("Key: %d is outside of bounds [%d, %d]\n", key, my_min_key, my_max_key);
-      passed = 0;
+      error = 1;
     }
   }
 
   // Verify the sum of the key population equals the expected bucket size
   int bucket_size_test = 0;
-  for(int i = 0; i < BUCKET_WIDTH; ++i){
+  for(unsigned int i = 0; i < BUCKET_WIDTH; ++i){
     bucket_size_test += my_local_key_counts[i];
   }
   if(bucket_size_test != my_bucket_size){
       printf("Rank %d Failed Verification!\n",my_rank);
       printf("Actual Bucket Size: %d Should be %lld\n", bucket_size_test, my_bucket_size);
-      passed = 0;
+      error = 1;
   }
 
   // Verify the final number of keys equals the initial number of keys
@@ -586,11 +587,12 @@ static void verify_results(int const * restrict const my_local_key_counts,
   if(total_num_keys != (long long int)(NUM_KEYS_PER_PE * NUM_PES)){
     if(my_rank == ROOT_PE){
       printf("Verification Failed!\n");
-      printf("Actual total number of keys: %llu Expected %llu\n", 
-                        total_num_keys,   NUM_KEYS_PER_PE * NUM_PES );
-      passed = 0;
+      printf("Actual total number of keys: %lld", total_num_keys );
+      printf(" Expected %" PRId64 "\n", NUM_KEYS_PER_PE * NUM_PES );
+      error = 1;
     }
   }
+  return error;
 }
 
 /*
@@ -615,7 +617,7 @@ static void log_times(char * log_file)
 
     if((fp = fopen(log_file, "a+b"))==NULL){
       perror("Error opening log file:");
-      exit(0);
+      exit(1);
     }
 
     if(print_names == 1){
@@ -640,7 +642,7 @@ static void report_summary_stats(void)
   if(timers[TIMER_TOTAL].seconds_iter > 0) {
     const uint32_t num_records = NUM_PES * timers[TIMER_TOTAL].seconds_iter;
     double temp = 0.0;
-    for(int i = 0; i < num_records; ++i){
+    for(unsigned int i = 0; i < num_records; ++i){
       temp += timers[TIMER_TOTAL].all_times[i];
     }
       printf("Average total time (per PE): %f seconds\n", temp/num_records);
@@ -649,7 +651,7 @@ static void report_summary_stats(void)
   if(timers[TIMER_ATA_KEYS].seconds_iter >0) {
     const uint32_t num_records = NUM_PES * timers[TIMER_ATA_KEYS].seconds_iter;
     double temp = 0.0;
-    for(int i = 0; i < num_records; ++i){
+    for(unsigned int i = 0; i < num_records; ++i){
       temp += timers[TIMER_ATA_KEYS].all_times[i];
     }
     printf("Average all2all time (per PE): %f seconds\n", temp/num_records);
@@ -678,22 +680,22 @@ static void print_timer_names(FILE * fp)
 static void print_run_info(FILE * fp)
 {
   fprintf(fp,"MPI\t");
-  fprintf(fp,"NUM_PES %llu\t", NUM_PES);
-  fprintf(fp,"Max_Key %llu\t", MAX_KEY_VAL); 
+  fprintf(fp,"NUM_PES %" PRIu64 "\t", NUM_PES);
+  fprintf(fp,"Max_Key %" PRIu64 "\t", MAX_KEY_VAL); 
   fprintf(fp,"Num_Iters %u\t", NUM_ITERATIONS);
 
   switch(SCALING_OPTION){
     case STRONG: {
-        fprintf(fp,"Strong Scaling: %llu total keys\t", NUM_KEYS_PER_PE * NUM_PES);
+        fprintf(fp,"Strong Scaling: %" PRIu64 " total keys\t", NUM_KEYS_PER_PE * NUM_PES);
         break;
       }
     case WEAK: {
-        fprintf(fp,"Weak Scaling: %llu keys per PE\t", NUM_KEYS_PER_PE);
+        fprintf(fp,"Weak Scaling: %" PRIu64 " keys per PE\t", NUM_KEYS_PER_PE);
         break;
       }
     case WEAK_ISOBUCKET: {
-        fprintf(fp,"Weak Scaling Constant Bucket Width: %llu keys per PE \t", NUM_KEYS_PER_PE);
-        fprintf(fp,"Constant Bucket Width: %llu\t", BUCKET_WIDTH);
+        fprintf(fp,"Weak Scaling Constant Bucket Width: %" PRIu64 " keys per PE \t", NUM_KEYS_PER_PE);
+        fprintf(fp,"Constant Bucket Width: %" PRIu64 "\t", BUCKET_WIDTH);
         break;
       }
     default:
@@ -723,7 +725,7 @@ static void print_timer_values(FILE * fp)
 {
   unsigned int num_records = NUM_PES * NUM_ITERATIONS; 
 
-  for(int i = 0; i < num_records; ++i) {
+  for(unsigned int i = 0; i < num_records; ++i) {
     for(int t = 0; t < TIMER_NTIMERS; ++t){
       if(timers[t].all_times != NULL){
         fprintf(fp,"%f\t", timers[t].all_times[i]);
